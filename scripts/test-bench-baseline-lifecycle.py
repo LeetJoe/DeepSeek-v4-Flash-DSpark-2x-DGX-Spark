@@ -1,89 +1,136 @@
 #!/usr/bin/env python3
-"""CPU regressions for the bench-baseline container lifecycle.
+"""Host-only lifecycle regressions for the two bench-baseline scripts.
 
-Both bench-baseline scripts used to (a) tear down only the HEAD project with a
-bare `docker compose down`, leaving the worker rank serving so the following
-start failed its worker precheck, and (b) launch the start script in the
-background, never check its exit code, wait up to 10 minutes for an API that
-could never come, and finally `kill $START_PID` — a PID that by then belonged
-to a recycled, unrelated process.
+Each shipped bench script runs in a temporary checkout whose stop script, start
+launcher, docker and bench-ttft.py are recorders; no Docker, SSH, GPU or API is
+touched, and the recorders log the order in which the bench reaches them. The
+launcher recorder returns only after a delay, so a launcher that stops being
+awaited would be observed measuring before it finished. Assertions are on that
+recorded order and on the bench's exit status:
 
-The launcher blocks until the API is up (or exits non-zero), so the scripts
-now stop through stop-deepseek-v4-flash-dspark.sh (both nodes) and run the
-start script in the foreground. These tests pin that structure.
+  * a failed stop or a failed launcher aborts the bench before it measures
+  * a successful launcher completes before the bench measures
+  * both teardowns (before the baseline start and before the patched restart)
+    go through the coordinated stop script
 """
-import re
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = [
+BASH = shutil.which("bash") or "/bin/bash"
+BENCH = (
     ROOT / "scripts" / "bench-baseline-issue22-only.sh",
     ROOT / "scripts" / "bench-baseline-no-patches.sh",
-]
+)
+
+# Stands in for the shipped two-node stop script: records the teardown, then
+# reports the operator's knob for a stop that could not bring the ranks down.
+STOP_RECORDER = """#!/bin/sh
+printf '{"step": "stop"}\\n' >> "$LIFECYCLE_LOG"
+exit "${FAIL_STOP:-0}"
+"""
+
+# Stands in for the shipped launcher and its block-until-ready contract: the
+# record is written when the launcher returns, from a background process only
+# after the delay, so an unawaited launcher loses the race to the measurement.
+START_RECORDER = """#!/bin/sh
+"$LIFECYCLE_PYTHON" -c 'import time; time.sleep(0.5)'
+printf '{"step": "start"}\\n' >> "$LIFECYCLE_LOG"
+exit "${FAIL_START:-0}"
+"""
+
+MEASURE_RECORDER = """#!/usr/bin/env python3
+import json
+import os
+
+with open(os.environ["LIFECYCLE_LOG"], "a") as log:
+    log.write(json.dumps({"step": "measure"}) + "\\n")
+"""
+
+# The bench scripts' own downtime pauses, container queries and any endpoint
+# probe: instant and inert, so an unstubbed call cannot reach a live system.
+COMMAND_STUBS = {
+    "docker": "printf '0 0 0 0\\n'\n",
+    "sleep": "exit 0\n",
+    "curl": "exit 7\n",
+}
 
 
-def code_of(script: Path) -> str:
-    # Comments keep the history of why the old pattern was wrong; they must not
-    # trip the guards. Assertions below run on code only.
-    return "\n".join(line for line in script.read_text().splitlines()
-                     if not line.strip().startswith("#"))
+def write_executable(path: Path, content: str) -> None:
+    path.write_text(content)
+    path.chmod(0o755)
 
 
-class Teardown(unittest.TestCase):
-    def test_no_bare_compose_down(self):
-        for script in SCRIPTS:
+class BenchLifecycle(unittest.TestCase):
+    def setUp(self):
+        self.workdir = Path(tempfile.mkdtemp(prefix="bench-baseline-lifecycle-"))
+        self.addCleanup(shutil.rmtree, self.workdir)
+        self.checkout = self.workdir / "checkout"
+        scripts = self.checkout / "scripts"
+        scripts.mkdir(parents=True)
+        for script in BENCH:
+            shutil.copyfile(script, scripts / script.name)
+        write_executable(self.checkout / "stop-deepseek-v4-flash-dspark.sh", STOP_RECORDER)
+        write_executable(self.checkout / "start-deepseek-v4-flash-dspark.sh", START_RECORDER)
+        write_executable(scripts / "bench-ttft.py", MEASURE_RECORDER)
+        bindir = self.workdir / "bin"
+        bindir.mkdir()
+        for command, body in COMMAND_STUBS.items():
+            write_executable(bindir / command, "#!/bin/sh\n" + body)
+        self.log = self.workdir / "lifecycle.jsonl"
+        self.env = {
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "HOME": str(self.workdir),
+            "LC_ALL": "C",
+            "LIFECYCLE_LOG": str(self.log),
+            "LIFECYCLE_PYTHON": sys.executable or "python3",
+        }
+
+    def run_bench(self, script: Path, fail_stop: bool = False, fail_start: bool = False):
+        self.log.write_text("")
+        env = dict(self.env, FAIL_STOP="1" if fail_stop else "0",
+                   FAIL_START="1" if fail_start else "0")
+        result = subprocess.run(
+            [BASH, str(self.checkout / "scripts" / script.name)],
+            cwd=self.checkout, env=env, input="y\n",
+            capture_output=True, text=True, timeout=60,
+        )
+        events = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return result, [event["step"] for event in events]
+
+    def test_failed_stop_aborts_before_measurement(self):
+        for script in BENCH:
             with self.subTest(script=script.name):
-                self.assertIsNone(
-                    re.search(r"docker compose[^\n]*\bdown\b", code_of(script)),
-                    "head-only compose down returned",
-                )
+                result, steps = self.run_bench(script, fail_stop=True)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(steps, ["stop"])
 
-    def test_stop_script_used_for_teardown(self):
-        for script in SCRIPTS:
-            text = script.read_text()
+    def test_failed_start_aborts_before_measurement(self):
+        for script in BENCH:
             with self.subTest(script=script.name):
-                # One stop before the baseline start, one before the patched
-                # restart.
-                self.assertGreaterEqual(
-                    text.count('bash "$SCRIPT_DIR/stop-deepseek-v4-flash-dspark.sh"'), 2,
-                )
+                result, steps = self.run_bench(script, fail_start=True)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(steps, ["stop", "start"])
 
-
-class Startup(unittest.TestCase):
-    def test_start_runs_in_foreground(self):
-        for script in SCRIPTS:
-            for lineno, line in enumerate(script.read_text().splitlines(), 1):
-                if "start-deepseek-v4-flash-dspark.sh" in line and not line.strip().startswith("#"):
-                    with self.subTest(script=script.name, line=lineno):
-                        self.assertFalse(line.rstrip().endswith("&"),
-                                         f"backgrounded launcher: {line!r}")
-
-    def test_no_start_pid_bookkeeping(self):
-        for script in SCRIPTS:
+    def test_successful_launcher_completes_before_measurement(self):
+        for script in BENCH:
             with self.subTest(script=script.name):
-                self.assertNotIn("START_PID", code_of(script))
-                self.assertNotRegex(code_of(script), r"kill \$")
+                result, steps = self.run_bench(script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertGreater(steps.index("measure"), steps.index("start"),
+                                   "measured before the launcher returned")
 
-    def test_no_local_wait_loop(self):
-        # The launcher waits for readiness itself; a local curl loop only hid
-        # launcher failure behind 10 minutes of dots.
-        for script in SCRIPTS:
+    def test_both_teardowns_use_the_coordinated_stop_script(self):
+        for script in BENCH:
             with self.subTest(script=script.name):
-                self.assertNotIn("Waiting for API", script.read_text())
-
-    def test_stop_precedes_every_start(self):
-        for script in SCRIPTS:
-            text = script.read_text()
-            starts = [m.start() for m in re.finditer(
-                r"bash \"\$SCRIPT_DIR/start-deepseek-v4-flash-dspark\.sh\"", text)]
-            stops = [m.start() for m in re.finditer(
-                r"bash \"\$SCRIPT_DIR/stop-deepseek-v4-flash-dspark\.sh\"", text)]
-            with self.subTest(script=script.name):
-                self.assertEqual(len(starts), len(stops))
-                for s_start, s_stop in zip(starts, stops):
-                    self.assertLess(s_stop, s_start,
-                                    "a start is not preceded by a stop")
+                result, steps = self.run_bench(script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(steps, ["stop", "start", "measure", "stop", "start"])
 
 
 if __name__ == "__main__":

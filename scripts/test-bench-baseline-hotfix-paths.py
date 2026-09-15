@@ -94,6 +94,7 @@ class Issue22HotfixInvocation(unittest.TestCase):
         scripts.mkdir(parents=True)
         shutil.copyfile(BENCH, scripts / BENCH.name)
         write_executable(self.checkout / "start-deepseek-v4-flash-dspark.sh", START_FIXTURE)
+        write_executable(self.checkout / "stop-deepseek-v4-flash-dspark.sh", "#!/bin/sh\nexit 0\n")
         write_executable(scripts / "bench-ttft.py", MEASURE_FIXTURE)
         self.mount = self.checkout / "patches"
         self.mount.mkdir()

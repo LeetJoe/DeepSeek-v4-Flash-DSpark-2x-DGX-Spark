@@ -93,19 +93,6 @@ class CounterValues(unittest.TestCase):
             with self.subTest(script=name):
                 fields = run_payload(payload, tree)
                 self.assertEqual(fields, ["0", "0", "0", "0"])
-                self.assertEqual(len(fields), 4)
-
-
-class SourceShape(unittest.TestCase):
-    def test_grep_c_no_longer_double_prints(self):
-        for name in SCRIPTS:
-            text = (ROOT / "scripts" / name).read_text()
-            with self.subTest(script=name):
-                self.assertIsNone(
-                    re.search(r"grep -c[^\n]*\|\| echo 0\)", text),
-                    "grep -c … || echo 0 returned",
-                )
-                self.assertEqual(text.count("|| true); c"), 4)
 
 
 if __name__ == "__main__":

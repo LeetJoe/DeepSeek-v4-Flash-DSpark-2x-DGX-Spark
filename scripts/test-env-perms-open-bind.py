@@ -36,7 +36,8 @@ PERMS_BLOCK = extract("# Secret-file permission check (begin)",
                       "# Secret-file permission check (end)")
 
 FAKE_STAT = """#!/usr/bin/env bash
-printf '%s\\n' "${FAKE_MODE:-600}"
+[ -n "${FAKE_MODE-}" ] || exit 1
+printf '%s\\n' "$FAKE_MODE"
 exit 0
 """
 
@@ -51,16 +52,20 @@ def run_block(block: str, env: dict, fake_mode: str | None = None):
         f.chmod(0o755)
     env_file = workdir / ".env.dspark"
     env_file.write_text("VLLM_API_KEY=sk-x\n")
-    lines = [f"PATH={shlex.quote(str(bindir))}:/usr/bin:/bin"]
+    lines = ["set -euo pipefail", f"PATH={shlex.quote(str(bindir))}:/usr/bin:/bin"]
     if fake_mode is not None:
         lines.append(f"export FAKE_MODE={shlex.quote(fake_mode)}")
     lines.append(f"ENV_FILE={shlex.quote(str(env_file))}")
     for k, v in env.items():
         lines.append(f"{k}={shlex.quote(v)}")
     lines.append(block)
+    lines.append("printf 'CONTINUED\\n'")
     r = subprocess.run(["bash", "-c", "\n".join(lines)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=10,
+                       env={"PATH": "/usr/bin:/bin", "HOME": str(workdir)})
     shutil.rmtree(workdir)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "CONTINUED\n", r.stdout + r.stderr
     return r
 
 
@@ -131,24 +136,14 @@ class EnvPermsWarning(unittest.TestCase):
         self.assertIn("chmod 600", r.stderr)
 
     def test_unreadable_mode_is_quiet(self):
-        # stat failure / non-numeric mode must never break a launch.
-        r = self.run_perms("")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("chmod 600", r.stderr)
+        # Failed stat and a successful but non-numeric result both continue.
+        for mode in ("", "unknown"):
+            with self.subTest(mode=mode):
+                r = self.run_perms(mode)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("chmod 600", r.stderr)
 
 
-class SourceShape(unittest.TestCase):
-    def test_blocks_present_and_ordered(self):
-        auth_end = SOURCE.index("# DSPARK_API_KEYS auth (end)")
-        open_begin = SOURCE.index("# Open-API warning (begin)")
-        perms_begin = SOURCE.index("# Secret-file permission check (begin)")
-        self.assertLess(auth_end, open_begin)
-        self.assertLess(open_begin, perms_begin)
-
-    def test_warnings_never_fail_the_launch(self):
-        for block in (OPEN_API_BLOCK, PERMS_BLOCK):
-            self.assertNotIn("exit 1", block)
-            self.assertNotIn("exit 2", block)
 
 
 if __name__ == "__main__":

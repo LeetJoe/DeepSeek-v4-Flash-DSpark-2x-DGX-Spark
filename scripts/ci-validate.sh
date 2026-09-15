@@ -20,6 +20,7 @@ for f in \
   build-dspark-vllm-runtime.sh \
   files/nfs-share.sh \
   files/nfs-server/entrypoint.sh \
+  scripts/ab-boot.sh \
   smoke-deepseek-v4-flash-dspark.sh \
   status-deepseek-v4-flash-dspark.sh \
   logs-deepseek-v4-flash-dspark.sh \
@@ -152,6 +153,8 @@ python3 scripts/test-status-logs-probes.py -q
 ok "test-status-logs-probes"
 python3 scripts/test-dsv4-vision-exp-hotfix.py -q
 ok "test-dsv4-vision-exp-hotfix"
+python3 scripts/test-ab-boot-sed-memgate.py -q
+ok "test-ab-boot-sed-memgate"
 python3 scripts/test-issue141-sparse-mla-decode-chunk.py -q
 ok "test-issue141-sparse-mla-decode-chunk"
 python3 scripts/test-issue136-xgrammar-termination.py -q

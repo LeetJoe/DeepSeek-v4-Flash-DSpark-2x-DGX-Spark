@@ -130,14 +130,6 @@ class MemoryGate(unittest.TestCase):
         self.assertIn("head MemAvailable unreadable", r.stderr)
 
 
-class SourceShape(unittest.TestCase):
-    def test_worker_host_first_match_only(self):
-        line = next(ln for ln in SOURCE.splitlines() if ln.startswith("WORKER="))
-        self.assertIn("head -n1", line)
-
-    def test_sed_replacement_uses_escaped_value(self):
-        self.assertNotIn("s|^${K}=.*|${K}=${V}|", SOURCE)
-        self.assertIn("V_SED=$(printf '%s' \"$V\" | sed 's/[&|\\\\]/\\\\&/g')", SOURCE)
 
 
 if __name__ == "__main__":

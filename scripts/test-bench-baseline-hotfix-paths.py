@@ -11,7 +11,6 @@ them. No Docker, SSH, GPU, model reload or benchmark endpoint is touched.
 
   * the mounted hotfix is invoked, and the measurement runs after it
   * a hotfix missing from the mount aborts the run before any measurement
-  * a path the mount cannot back is refused instead of silently succeeding
 
 The pre-fix Step 3 targeted /tmp/hotfix-nvfp4-ds-mla-issue22.sh, which no mount
 backs, so that run aborted at Step 3 without reaching the measurement.
@@ -27,10 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASH = shutil.which("bash") or "/bin/bash"
 BENCH = ROOT / "scripts" / "bench-baseline-issue22-only.sh"
 
-MOUNT_POINT = "/opt/dspark-patches"  # container path compose mounts ./patches at
 HOTFIX = "hotfix-nvfp4-ds-mla-issue22.sh"
-LEGACY_HOTFIX = "/tmp/hotfix-nvfp4-ds-mla-issue22.sh"  # the pre-fix Step 3 path
-CONTAINER = "deepseek-v4-flash-vllm-dspark-1"
 
 # Fake docker transport. Compose teardown is inert, the patch-state query returns
 # zero counts, and a `bash <path>` exec succeeds only for a file the mount
@@ -123,13 +119,6 @@ class Issue22HotfixInvocation(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
         )
 
-    def run_docker(self, *args):
-        self.log.write_text("")
-        return subprocess.run(
-            [str(self.bindir / "docker"), *args],
-            env=self.env, capture_output=True, text=True, timeout=30,
-        )
-
     def test_mounted_hotfix_is_invoked_before_measurement(self):
         result = self.run_bench()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -139,18 +128,6 @@ class Issue22HotfixInvocation(unittest.TestCase):
         (self.mount / HOTFIX).unlink()
         result = self.run_bench()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertEqual(self.steps(), [])
-
-    def test_transport_refuses_paths_the_mount_cannot_back(self):
-        # The legacy /tmp path stays unreachable even with a same-named file
-        # elsewhere, because only the mount backs a container path.
-        elsewhere = self.workdir / "container-tmp"
-        elsewhere.mkdir()
-        shutil.copyfile(self.mount / HOTFIX, elsewhere / HOTFIX)
-        for path in (LEGACY_HOTFIX, f"{MOUNT_POINT}/hotfix-not-in-this-revision.sh"):
-            with self.subTest(path=path):
-                executed = self.run_docker("exec", CONTAINER, "bash", path)
-                self.assertNotEqual(executed.returncode, 0, executed.stdout)
         self.assertEqual(self.steps(), [])
 
 

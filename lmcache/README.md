@@ -89,10 +89,22 @@ pip install sortedcontainers aiofile aiofiles cupy-cuda13x
 `cupy` matters: without it the server *silently* fails GPU-context creation
 and every engine registration kills the vLLM head (LMCache #4759 covers the
 fail-fast ask). The lmcache wheel's bundled `cuda_ops` is ABI-mismatched
-against this image's torch — it soft-falls back to torch ops (works; slower
-stores). Building it from source against the image's torch works
-(`TORCH_CUDA_ARCH_LIST=12.1a`; the image's CUDA toolkit is header-trimmed —
-fill cusparse/cusolver/cufft headers from the `nvidia-*-cu13` pip wheels).
+against this image's torch (the PyPI 0.5.4/0.5.5 wheels are built against
+`torch==2.13.0`; the image ships 2.11) and the 0.5.x warning misreports the
+load failure as "not found". **Do not rely on the torch-ops fallback for
+this model.** Through LMCache 0.5.5 the fallback is not functional for the
+V4 KV layout: it ignores the padded per-block stride of vLLM's shared KV
+pages (stores gather the wrong blocks) and rebuilds the `indexer.k_cache`
+(`NL_X_NB_BSV_BSS`) layers as 5-D, so every reload fails with
+`index_copy_(): ... Source dimensionality (3), destination dimensionality (5)`
+while the request still returns with `cached_tokens > 0` and garbage output.
+The fix is an LMCache change (torch fallback: honour `block_stride_elems`,
+rank-3 BSV_BSS rebuild with page/row repacking, device-resident chunk
+pointers); until a release carries it, build `cuda_ops` from source against
+the image's torch (`TORCH_CUDA_ARCH_LIST=12.1a`; the image's CUDA toolkit is
+header-trimmed — fill cusparse/cusolver/cufft headers from the
+`nvidia-*-cu13` pip wheels) and confirm the server log no longer prints the
+`CudaDeviceOps stays on the torch baseline` warning before trusting a reload.
 
 ## Non-negotiable configuration
 

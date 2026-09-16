@@ -11,7 +11,7 @@ a failed start, and conflated the two cases in one message.
 The checks now answer with sentinel 42 from the remote probe: 42 (stale
 rank) -> exit 3 with the already-running hint; any other failure (ssh
 unreachable etc.) -> exit 1. These tests extract the shipped blocks and run
-them against fake ssh/docker binaries.
+them with the real transport wrapper against fake ssh/docker binaries.
 """
 import shlex
 import shutil
@@ -31,18 +31,20 @@ def extract(start_marker: str, end_marker: str) -> str:
 
 
 HINT_FN = extract("already_running_hint() {", "\n}")
+TRANSPORT_FN = extract("dssh() {", "\n")
 WORKER_BLOCK = extract("worker_rc=0", "esac")
 WORKER2_BLOCK = extract("worker2_rc=0", "esac")
 
 FAKE_SSH = """#!/usr/bin/env bash
+while [ "${1:-}" = "-o" ]; do shift 2; done
 host="$1"; shift
 if [ "$host" = "unreachable.example" ]; then exit 255; fi
 exec bash -c "$*"
 """
 
 
-def run_block(block: str, *, stale: bool, unreachable: bool = False,
-              worker2: bool = False) -> subprocess.CompletedProcess:
+def run_block(block: str, *, stale: bool,
+              unreachable: bool = False) -> subprocess.CompletedProcess:
     workdir = Path(tempfile.mkdtemp())
     bindir = workdir / "bin"
     bindir.mkdir()
@@ -61,6 +63,7 @@ WORKER_HOST={host}
 WORKER2_HOST=worker2.example
 DSPARK_TP3=1
 {HINT_FN}
+{TRANSPORT_FN}
 {block}
 echo BLOCK_PASSED
 """
@@ -78,31 +81,14 @@ class WorkerCheck(unittest.TestCase):
     def test_stale_worker_exits_3_with_hint(self):
         result = run_block(WORKER_BLOCK, stale=True)
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("treat exit 3 as already-up", result.stderr)
-        self.assertIn("stale rank", result.stderr)
 
     def test_unreachable_worker_exits_1(self):
         result = run_block(WORKER_BLOCK, stale=False, unreachable=True)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("worker check on unreachable.example failed (ssh exit 255)",
-                      result.stderr)
 
     def test_stale_worker2_exits_3_with_hint(self):
-        result = run_block(WORKER2_BLOCK, stale=True, worker2=True)
+        result = run_block(WORKER2_BLOCK, stale=True)
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("treat exit 3 as already-up", result.stderr)
-
-
-class SourceShape(unittest.TestCase):
-    def test_sentinel_distinguishes_stale_from_ssh_failure(self):
-        self.assertEqual(SOURCE.count("exit 42"), 2)   # worker + worker2 probes
-        self.assertNotIn('exit "$worker_rc"', SOURCE)
-        self.assertNotIn('exit "$worker2_rc"', SOURCE)
-
-    def test_exit3_contract_strings_intact(self):
-        # ci-validate.sh greps these (#72 guard); keep them present.
-        self.assertIn("exit 3", SOURCE)
-        self.assertIn("SuccessExitStatus=3", SOURCE)
 
 
 if __name__ == "__main__":

@@ -143,6 +143,8 @@ python3 scripts/test-stop-name-filter.py -q
 ok "test-stop-name-filter"
 python3 scripts/test-served-model-alias.py -q
 ok "test-served-model-alias"
+python3 scripts/test-start-worker-stale-exit.py -q
+ok "test-start-worker-stale-exit"
 python3 scripts/test-dspark-api-keys.py -q
 ok "test-dspark-api-keys"
 python3 scripts/test-bench-baseline-hotfix-paths.py -q
